@@ -10,6 +10,20 @@
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal"
+        },
+        {
+            "name": "EDA",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "EDA",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "feature_extraction",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "feature_extraction",
+            "console": "integratedTerminal"
         }
     ]
 }

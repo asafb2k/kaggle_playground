@@ -1,2 +1,9 @@
-torch
-torchvision
+# torch
+# torchvision
+pandas
+kaggle-metrics
+scikit-learn
+matplotlib
+scikit-image
+tqdm
+opencv-python
