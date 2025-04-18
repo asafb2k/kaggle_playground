@@ -425,7 +425,7 @@ def main():
         'experiment_name': experiment_name,
         'device': str(device),
         'batch_size': 8,
-        'learning_rate': 0.01,
+        'learning_rate': 0.0001,
         'weight_decay': 1e-5,
         'num_epochs': 1500,
         'pseudo_start_epoch': 150,
@@ -493,7 +493,12 @@ def main():
     
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.9)
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer, 
+        max_lr=0.001,
+        total_steps=num_epochs,
+        pct_start=0.1,  # Spend 10% of training time warming up
+    )
     
     # Use mixed precision training if available
     use_amp = torch.cuda.is_available()
