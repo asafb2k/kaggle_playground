@@ -425,10 +425,10 @@ def main():
         'experiment_name': experiment_name,
         'device': str(device),
         'batch_size': 8,
-        'learning_rate': 0.0001,
+        'learning_rate': 0.000001,
         'weight_decay': 1e-5,
         'num_epochs': 1500,
-        'pseudo_start_epoch': 150,
+        'pseudo_start_epoch': 15,
         'pseudo_threshold': 0.95,
         'pseudo_weight': 0.75,
         'confidence_threshold': 0.7,
@@ -495,9 +495,9 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer, 
-        max_lr=0.001,
+        max_lr=0.00001,
         total_steps=config['num_epochs'],
-        pct_start=0.1,  # Spend 10% of training time warming up
+        pct_start=0.01,  # Spend 10% of training time warming up
     )
     
     # Use mixed precision training if available
