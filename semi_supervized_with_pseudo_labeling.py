@@ -496,7 +496,7 @@ def main():
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer, 
         max_lr=0.001,
-        total_steps=num_epochs,
+        total_steps=config['num_epochs'],
         pct_start=0.1,  # Spend 10% of training time warming up
     )
     
