@@ -4,6 +4,7 @@ import os
 import tifffile
 import torch
 from torch.utils.data import Dataset
+import scipy
 
 
 class ForamDataset(Dataset):
@@ -50,3 +51,69 @@ class ForamDataset(Dataset):
             return volume_tensor, label
         else:
             return volume_tensor, file_id
+        
+
+class Compose:
+    """Composes several transforms together."""
+    def __init__(self, transforms):
+        self.transforms = transforms
+        
+    def __call__(self, volume):
+        for transform in self.transforms:
+            volume = transform(volume)
+        return volume
+
+
+class RandomNoise:
+    """Add random Gaussian noise to the volume."""
+    def __init__(self, std=0.02, p=0.5):
+        self.std = std
+        self.p = p
+        
+    def __call__(self, volume):
+        if np.random.rand() < self.p:
+            noise = np.random.normal(0, self.std, volume.shape).astype(volume.dtype)
+            volume = volume + noise
+            # Clip to ensure values stay within valid range
+            volume = np.clip(volume, 0, 1)
+        return volume
+
+class Normalize:
+    """Normalize the volume using mean and std."""
+    def __init__(self, mean=0.5, std=0.5):
+        self.mean = mean
+        self.std = std
+        
+    def __call__(self, volume):
+        return (volume - self.mean) / self.std
+
+# Create training and validation transforms
+def get_train_transform(mean=0.5, std=0.5):
+    return Compose([
+        RandomNoise(std=0.02, p=0.5),
+        Normalize(mean=mean, std=std)
+    ])
+
+def get_val_transform(mean=0.5, std=0.5):
+    return Compose([
+        Normalize(mean=mean, std=std)
+    ])
+
+# Utility function to calculate dataset mean and std
+def calculate_dataset_stats(dataloader):
+    """Calculate mean and std of the dataset for normalization."""
+    mean_sum = 0
+    var_sum = 0
+    count = 0
+    
+    for inputs, _ in dataloader:
+        batch_size = inputs.size(0)
+        inputs = inputs.view(batch_size, -1)
+        mean_sum += inputs.mean(1).sum(0)
+        var_sum += inputs.var(1).sum(0)
+        count += batch_size
+    
+    mean = mean_sum / count
+    std = torch.sqrt(var_sum / count)
+    
+    return mean.item(), std.item()

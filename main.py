@@ -10,12 +10,15 @@ import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Subset
 from torch.cuda.amp import autocast, GradScaler
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from tqdm import tqdm
 import time
+
+# Import our custom transformations
+from data_loading import get_train_transform, get_val_transform, calculate_dataset_stats
 
 # Set random seeds for reproducibility
 np.random.seed(42)
@@ -184,6 +187,7 @@ def validate(model, dataloader, criterion, device):
     return epoch_loss, epoch_acc, all_preds, all_labels
 
 def main():
+    experiment_name = 'experiment_2_adding_transformations'
     # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -200,9 +204,22 @@ def main():
     
     print(f"Training samples: {len(train_df)}, Validation samples: {len(val_df)}")
     
-    # Create datasets and dataloaders
-    train_dataset = ForamDataset(train_df, volume_dir, transform=None)
-    val_dataset = ForamDataset(val_df, volume_dir, transform=None)
+    # Create datasets without transformations first to calculate stats
+    temp_train_dataset = ForamDataset(train_df, volume_dir, transform=None)
+    temp_train_loader = DataLoader(temp_train_dataset, batch_size=2, shuffle=False, num_workers=0)
+    
+    # Calculate dataset stats for normalization
+    print("Calculating dataset statistics for normalization...")
+    data_mean, data_std = calculate_dataset_stats(temp_train_loader)
+    print(f"Dataset mean: {data_mean:.4f}, std: {data_std:.4f}")
+    
+    # Now create datasets with appropriate transformations
+    train_transform = get_train_transform(mean=data_mean, std=data_std)
+    val_transform = get_val_transform(mean=data_mean, std=data_std)
+    
+    # Create datasets and dataloaders with transformations
+    train_dataset = ForamDataset(train_df, volume_dir, transform=train_transform)
+    val_dataset = ForamDataset(val_df, volume_dir, transform=val_transform)
     
     train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_dataset, batch_size=2, shuffle=False, num_workers=0)
@@ -252,7 +269,6 @@ def main():
         print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
 
         experiments_directory = Path("experiments")
-        experiment_name = 'experiment_1'
         experiment_path = experiments_directory / experiment_name
         os.makedirs(experiment_path, exist_ok=True)
         
