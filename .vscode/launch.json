@@ -12,6 +12,14 @@
             "console": "integratedTerminal"
         },
         {
+            "name": "main",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "main",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
             "name": "EDA",
             "type": "debugpy",
             "request": "launch",
@@ -24,6 +32,13 @@
             "request": "launch",
             "module": "feature_extraction",
             "console": "integratedTerminal"
-        }
+        },
+        {
+            "name": "generate_submission",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "generate_submission",
+            "console": "integratedTerminal"
+        },
     ]
 }
