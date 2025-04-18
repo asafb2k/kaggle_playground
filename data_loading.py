@@ -8,7 +8,10 @@ from torch.utils.data import Dataset
 
 class ForamDataset(Dataset):
     def __init__(self, csv_file, volume_dir, transform=None, is_labeled=True):
-        self.data_frame = pd.read_csv(csv_file)
+        if type(csv_file) is str:
+            self.data_frame = pd.read_csv(csv_file)
+        else:
+            self.data_frame = csv_file
         self.volume_dir = volume_dir
         self.transform = transform
         self.is_labeled = is_labeled
@@ -27,6 +30,9 @@ class ForamDataset(Dataset):
     
     def __getitem__(self, idx):
         file_id = self.data_frame.iloc[idx, 0]
+
+        if type(file_id) is str and not file_id.isnumeric():
+            file_id = int(file_id.split('_')[1])
         
         # Get pre-found file path
         file_path = self.file_paths.get(file_id)

@@ -40,5 +40,13 @@
             "module": "generate_submission",
             "console": "integratedTerminal"
         },
+        {
+            "name": "binary_atitude",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "binary_atitude",
+            "console": "integratedTerminal"
+        },
+
     ]
 }
