@@ -20,6 +20,14 @@
             "justMyCode": false
         },
         {
+            "name": "semi_supervized_with_pseudo_labeling",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "semi_supervized_with_pseudo_labeling",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
             "name": "EDA",
             "type": "debugpy",
             "request": "launch",

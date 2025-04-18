@@ -14,8 +14,12 @@ from torch.utils.data import Dataset, DataLoader, Subset
 from torch.cuda.amp import autocast, GradScaler
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
+# Import TensorBoard
+from torch.utils.tensorboard import SummaryWriter
+
 from tqdm import tqdm
 import time
+import datetime
 
 # Set random seeds for reproducibility
 np.random.seed(42)
@@ -141,7 +145,7 @@ class ForamUnlabeledDataset(Dataset):
         return volume_tensor, file_id
 
 # Training and validation functions
-def train_epoch(model, dataloader, criterion, optimizer, device, scaler=None):
+def train_epoch(model, dataloader, criterion, optimizer, device, writer, epoch, scaler=None):
     model.train()
     running_loss = 0.0
     correct = 0
@@ -180,9 +184,17 @@ def train_epoch(model, dataloader, criterion, optimizer, device, scaler=None):
     epoch_loss = running_loss / total
     epoch_acc = correct / total
     
+    # Log metrics to TensorBoard
+    writer.add_scalar('Loss/train', epoch_loss, epoch)
+    writer.add_scalar('Accuracy/train', epoch_acc, epoch)
+    
+    # Log learning rate
+    for param_group in optimizer.param_groups:
+        writer.add_scalar('Learning_rate', param_group['lr'], epoch)
+    
     return epoch_loss, epoch_acc
 
-def validate(model, dataloader, criterion, device):
+def validate(model, dataloader, criterion, device, writer, epoch):
     model.eval()
     running_loss = 0.0
     correct = 0
@@ -191,6 +203,10 @@ def validate(model, dataloader, criterion, device):
     # For confusion matrix
     all_preds = []
     all_labels = []
+    
+    # For per-class accuracy tracking
+    class_correct = np.zeros(15)
+    class_total = np.zeros(15)
     
     with torch.no_grad():
         for inputs, labels in tqdm(dataloader, desc="Validation"):
@@ -207,6 +223,12 @@ def validate(model, dataloader, criterion, device):
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
             
+            # Track per-class accuracy
+            for c in range(15):
+                class_mask = (labels == c)
+                class_correct[c] += (predicted[class_mask] == c).sum().item()
+                class_total[c] += class_mask.sum().item()
+            
             # Store predictions and labels for confusion matrix
             all_preds.extend(predicted.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
@@ -214,11 +236,33 @@ def validate(model, dataloader, criterion, device):
     epoch_loss = running_loss / total
     epoch_acc = correct / total
     
+    # Log metrics to TensorBoard
+    writer.add_scalar('Loss/val', epoch_loss, epoch)
+    writer.add_scalar('Accuracy/val', epoch_acc, epoch)
+    
+    # Log per-class accuracy to TensorBoard
+    for c in range(15):
+        if class_total[c] > 0:
+            class_acc = class_correct[c] / class_total[c]
+            writer.add_scalar(f'Accuracy_class_{c}/val', class_acc, epoch)
+    
+    # Create and log confusion matrix as figure
+    cm = confusion_matrix(all_labels, all_preds)
+    fig = plt.figure(figsize=(10, 8))
+    plt.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
+    plt.title('Confusion Matrix')
+    plt.colorbar()
+    plt.xlabel('Predicted Label')
+    plt.ylabel('True Label')
+    plt.tight_layout()
+    writer.add_figure('Confusion_Matrix', fig, epoch)
+    plt.close(fig)
+    
     return epoch_loss, epoch_acc, all_preds, all_labels
 
 # Semi-supervised learning with pseudo-labeling
 def pseudo_label_epoch(model, labeled_loader, unlabeled_loader, criterion, optimizer, device, 
-                       pseudo_threshold=0.8, pseudo_weight=0.5, scaler=None):
+                       writer, epoch, pseudo_threshold=0.95, pseudo_weight=0.75, scaler=None):
     model.train()
     running_loss = 0.0
     correct = 0
@@ -258,6 +302,10 @@ def pseudo_label_epoch(model, labeled_loader, unlabeled_loader, criterion, optim
     # Then, use pseudo-labeling on unlabeled data
     model.eval()  # Switch to eval mode to generate pseudo-labels
     pseudo_labeled = 0
+    pseudo_loss_sum = 0.0
+    
+    # Class distribution of pseudo-labels
+    pseudo_class_counts = np.zeros(15)
     
     with torch.no_grad():
         for inputs, _ in tqdm(unlabeled_loader, desc="Generating pseudo-labels"):
@@ -281,6 +329,10 @@ def pseudo_label_epoch(model, labeled_loader, unlabeled_loader, criterion, optim
             
             # Count how many pseudo-labels we're using
             pseudo_labeled += mask.sum().item()
+            
+            # Track class distribution of pseudo-labels
+            for c in range(15):
+                pseudo_class_counts[c] += (pseudo_labels[mask] == c).sum().item()
     
     # Now train on pseudo-labeled data
     if pseudo_labeled > 0:
@@ -326,21 +378,66 @@ def pseudo_label_epoch(model, labeled_loader, unlabeled_loader, criterion, optim
                 optimizer.step()
             
             # Update metrics (but don't count pseudo-labeled samples in accuracy)
-            running_loss += loss_pl.item() * confident_inputs.size(0)
+            pseudo_loss_sum += loss_pl.item() * confident_inputs.size(0)
     
     print(f"Used {pseudo_labeled} pseudo-labeled samples")
+    
+    # Log pseudo-labeling metrics to TensorBoard
+    writer.add_scalar('Pseudo/samples_used', pseudo_labeled, epoch)
+    if pseudo_labeled > 0:
+        writer.add_scalar('Pseudo/avg_loss', pseudo_loss_sum / pseudo_labeled, epoch)
+    
+    # Log class distribution of pseudo-labels
+    for c in range(15):
+        writer.add_scalar(f'Pseudo/class_{c}_count', pseudo_class_counts[c], epoch)
     
     # Return the metrics from labeled data only for consistent monitoring
     epoch_loss = running_loss / total
     epoch_acc = correct / total
     
+    # Log metrics to TensorBoard
+    writer.add_scalar('Loss/train', epoch_loss, epoch)
+    writer.add_scalar('Accuracy/train', epoch_acc, epoch)
+    
     return epoch_loss, epoch_acc
 
 def main():
-    experiment_name = 'semi_supervised_learning'
+    # Create a unique run name with timestamp
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    experiment_name = f'semi_supervised_learning_{timestamp}'
+    
     # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    
+    # Create directories for experiment
+    experiments_directory = Path("experiments")
+    experiment_path = experiments_directory / experiment_name
+    tensorboard_path = experiment_path / 'tensorboard'
+    os.makedirs(experiment_path, exist_ok=True)
+    os.makedirs(tensorboard_path, exist_ok=True)
+    
+    # Initialize TensorBoard writer
+    writer = SummaryWriter(log_dir=tensorboard_path)
+    
+    # Save experiment configuration for tracking
+    config = {
+        'experiment_name': experiment_name,
+        'device': str(device),
+        'batch_size': 8,
+        'learning_rate': 0.01,
+        'weight_decay': 1e-5,
+        'num_epochs': 1500,
+        'pseudo_start_epoch': 150,
+        'pseudo_threshold': 0.95,
+        'pseudo_weight': 0.75,
+        'confidence_threshold': 0.7,
+    }
+    
+    # Save config to experiment directory
+    with open(experiment_path / 'config.txt', 'w') as f:
+        for key, value in config.items():
+            f.write(f"{key}: {value}\n")
     
     # Load labeled data
     labeled_data_path = Path(r'data\labelled.csv')  # Update with your path
@@ -357,9 +454,15 @@ def main():
     print(f"Loaded {len(unlabeled_df)} unlabeled samples")
     
     # Split labeled data into train and validation sets
-    train_df, val_df = train_test_split(labeled_df, test_size=0.35, stratify=labeled_df['label'], random_state=42)
+    train_df, val_df = train_test_split(labeled_df, test_size=0.5, stratify=labeled_df['label'], random_state=42)
     
     print(f"Training samples: {len(train_df)}, Validation samples: {len(val_df)}")
+    
+    # Log dataset information to TensorBoard
+    writer.add_text('Data/total_labeled', str(len(labeled_df)))
+    writer.add_text('Data/train_labeled', str(len(train_df)))
+    writer.add_text('Data/val_labeled', str(len(val_df)))
+    writer.add_text('Data/unlabeled', str(len(unlabeled_df)))
     
     # Create datasets
     train_dataset = ForamDataset(train_df, labeled_volume_dir)
@@ -368,38 +471,42 @@ def main():
     
     # For faster experimentation, use a subset of unlabeled data
     # Comment out this section if you want to use all unlabeled data
-    subset_size = 1000  # Adjust as needed based on your GPU memory
+    subset_size = 10000  # Adjust as needed based on your GPU memory
     subset_indices = np.random.choice(len(unlabeled_dataset), subset_size, replace=False)
     unlabeled_subset = Subset(unlabeled_dataset, subset_indices)
     
     # Create dataloaders
-    train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_dataset, batch_size=2, shuffle=False, num_workers=0)
+    train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=0)
     # Use the subset for faster training during development
-    unlabeled_loader = DataLoader(unlabeled_subset, batch_size=2, shuffle=True, num_workers=0)
+    unlabeled_loader = DataLoader(unlabeled_subset, batch_size=config['batch_size'], shuffle=True, num_workers=0)
     # For final training, use all unlabeled data:
-    # unlabeled_loader = DataLoader(unlabeled_dataset, batch_size=2, shuffle=True, num_workers=0)
+    # unlabeled_loader = DataLoader(unlabeled_dataset, batch_size=config['batch_size'], shuffle=True, num_workers=0)
     
     # Initialize model, loss function, and optimizer
     model = Foram3DCNN(num_classes=15)  # 15 classes including unknown class
     model = model.to(device)
     
+    # Log model graph to TensorBoard (requires a sample input)
+    sample_input = torch.zeros(1, 1, 128, 128, 128, device=device)
+    writer.add_graph(model, sample_input)
+    
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=0.0005, weight_decay=1e-5)
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, verbose=True)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.9)
     
     # Use mixed precision training if available
     use_amp = torch.cuda.is_available()
     scaler = GradScaler() if use_amp else None
     
     # Training loop
-    num_epochs = 100
+    num_epochs = config['num_epochs']
     best_val_acc = 0.0
     
     # Hyperparameters for pseudo-labeling
-    pseudo_start_epoch = 5  # Start pseudo-labeling after this epoch
-    pseudo_threshold = 0.85  # Confidence threshold for pseudo-labels
-    pseudo_weight = 0.5  # Weight for pseudo-labeled loss
+    pseudo_start_epoch = config['pseudo_start_epoch']
+    pseudo_threshold = config['pseudo_threshold']
+    pseudo_weight = config['pseudo_weight']
     
     # For tracking metrics
     train_losses = []
@@ -416,43 +523,45 @@ def main():
         if epoch >= pseudo_start_epoch:
             train_loss, train_acc = pseudo_label_epoch(
                 model, train_loader, unlabeled_loader, criterion, optimizer, device, 
-                pseudo_threshold=pseudo_threshold, pseudo_weight=pseudo_weight, scaler=scaler
+                writer, epoch, pseudo_threshold=pseudo_threshold, pseudo_weight=pseudo_weight, scaler=scaler
             )
         else:
             # Regular supervised training for initial epochs
             train_loss, train_acc = train_epoch(
-                model, train_loader, criterion, optimizer, device, scaler
+                model, train_loader, criterion, optimizer, device, writer, epoch, scaler
             )
             
         train_losses.append(train_loss)
         train_accs.append(train_acc)
         
         # Validate
-        val_loss, val_acc, all_preds, all_labels = validate(model, val_loader, criterion, device)
+        val_loss, val_acc, all_preds, all_labels = validate(model, val_loader, criterion, device, writer, epoch)
         val_losses.append(val_loss)
         val_accs.append(val_acc)
         
         # Update learning rate
-        scheduler.step(val_loss)
+        scheduler.step()
         
         # Print metrics
         print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")
         print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
-
-        experiments_directory = Path("experiments")
-        experiment_path = experiments_directory / experiment_name
-        os.makedirs(experiment_path, exist_ok=True)
         
         # Save best model
         if val_acc > best_val_acc:
             best_val_acc = val_acc
-            model_save_path = experiment_path / f'best_model_acc_val_{best_val_acc}.pth'
+            model_save_path = experiment_path / f'best_model_acc_val_epoch_{epoch}_{best_val_acc:.4f}.pth'
             torch.save(model.state_dict(), model_save_path.as_posix())
             print("Saved best model checkpoint")
             
+            # Update best model info in TensorBoard
+            writer.add_text('Model/best_epoch', str(epoch), epoch)
+            writer.add_text('Model/best_accuracy', f"{best_val_acc:.4f}", epoch)
+            
             # Generate detailed metrics for best model
             print("\nClassification Report:")
-            print(classification_report(all_labels, all_preds))
+            report = classification_report(all_labels, all_preds)
+            print(report)
+            writer.add_text('Metrics/classification_report', report.replace('\n', '  \n'), epoch)
             
             # Calculate confusion matrix
             cm = confusion_matrix(all_labels, all_preds)
@@ -471,6 +580,10 @@ def main():
     elapsed_time = time.time() - start_time
     print(f"\nTraining completed in {elapsed_time / 60:.2f} minutes")
     print(f"Best validation accuracy: {best_val_acc:.4f}")
+    
+    # Log final training time
+    writer.add_text('Training/time_minutes', f"{elapsed_time / 60:.2f}")
+    writer.add_text('Training/best_accuracy', f"{best_val_acc:.4f}")
     
     # Plot training and validation metrics
     plt.figure(figsize=(12, 5))
@@ -499,9 +612,15 @@ def main():
     print("Training and validation plots saved.")
 
     # Generate final submission
-    generate_submission(model, unlabeled_dataset, device, experiment_path)
+    generate_submission(model, unlabeled_dataset, device, experiment_path, config['confidence_threshold'])
+    
+    # Close TensorBoard writer
+    writer.close()
+    
+    print(f"TensorBoard logs saved to {tensorboard_path}")
+    print(f"To view TensorBoard, run: tensorboard --logdir={tensorboard_path}")
 
-def generate_submission(model, unlabeled_dataset, device, experiment_path):
+def generate_submission(model, unlabeled_dataset, device, experiment_path, confidence_threshold=0.7):
     """Generate submission file for the competition"""
     # Use all unlabeled data for final prediction
     unlabeled_loader = DataLoader(unlabeled_dataset, batch_size=4, shuffle=False, num_workers=0)
@@ -509,8 +628,6 @@ def generate_submission(model, unlabeled_dataset, device, experiment_path):
     model.eval()
     all_ids = []
     all_preds = []
-    
-    confidence_threshold = 0.7  # Threshold for unknown class
     
     with torch.no_grad():
         for inputs, ids in tqdm(unlabeled_loader, desc="Generating predictions"):
@@ -557,7 +674,12 @@ def generate_submission(model, unlabeled_dataset, device, experiment_path):
     print("\nClass distribution in predictions:")
     value_counts = submission_df['label'].value_counts().sort_index()
     for class_id, count in value_counts.items():
-        print(f"Class {class_id}: {count} samples ({count/len(submission_df)*100:.2f}%)")
+        percentage = count/len(submission_df)*100
+        print(f"Class {class_id}: {count} samples ({percentage:.2f}%)")
+        
+        # Save this information to a text file
+        with open(experiment_path / 'submission_stats.txt', 'a') as f:
+            f.write(f"Class {class_id}: {count} samples ({percentage:.2f}%)\n")
 
 if __name__ == "__main__":
     main()
