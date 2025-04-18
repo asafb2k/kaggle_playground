@@ -357,7 +357,7 @@ def generate_predictions_from_binary_classifiers():
     
     # Create dataset and dataloader for unlabeled data
     unlabeled_dataset = ForamUnlabeledDataset(unlabeled_df, unlabeled_volume_dir)
-    unlabeled_loader = DataLoader(unlabeled_dataset, batch_size=1, shuffle=False, num_workers=0)
+    unlabeled_loader = DataLoader(unlabeled_dataset, batch_size=16, shuffle=False, num_workers=0)
     
     # Load all binary classifiers
     binary_models = {}
@@ -392,13 +392,13 @@ def generate_predictions_from_binary_classifiers():
             inputs = inputs.to(device)
             all_ids.extend(ids.cpu().numpy().astype(int))
             
-            all_probs_dict[int(ids)] = []
+            # all_probs_dict[int(ids)] = []
             # Get predictions from each binary classifier
             for class_id, model in binary_models.items():
                 outputs = model(inputs)
                 # Get probability of positive class (class 1)
                 probs = F.softmax(outputs, dim=1)[:, 1]
-                all_probs_dict[int(ids)].append(float(probs.cpu().numpy()[0]))
+                # all_probs_dict[int(ids)].append(float(probs.cpu().numpy()[0]))
                 all_probs[len(all_ids) - len(ids):len(all_ids), class_id] = probs.cpu().numpy()
             
                 # lets show bar chart of probabilities using all_probs_dict
