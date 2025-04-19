@@ -333,6 +333,7 @@ def pseudo_label_epoch(model, labeled_loader, unlabeled_loader, criterion, optim
         pseudo_labeled = confident_labels.shape[0]
     
     print(f"Generated {pseudo_labeled} confident pseudo-labels")
+    writer.add_scalar('Pseudo/num_pseudo_labels', pseudo_labeled, epoch)
     
     # SWITCH TO TRAINING MODE FOR THE COMBINED TRAINING
     model.train()
@@ -489,7 +490,7 @@ def main():
         'num_epochs': 1500,
         'pseudo_start_epoch': 30,
         'confidence_threshold': 0.7,
-        'pseudo_initial_threshold': 0.99,  # Start with higher confidence
+        'pseudo_initial_threshold': 0.98,  # Start with higher confidence
         'pseudo_final_threshold': 0.85,    # End with lower threshold
         'pseudo_initial_weight': 0.3,      # Start with lower weight
         'pseudo_final_weight': 0.7,        # End with higher weight
@@ -604,6 +605,7 @@ def main():
             progress = min(1.0, (epoch - pseudo_start_epoch) / (num_epochs - pseudo_start_epoch))
             current_threshold = config['pseudo_initial_threshold'] - progress * (config['pseudo_initial_threshold'] - config['pseudo_final_threshold'])
             current_weight = config['pseudo_initial_weight'] + progress * (config['pseudo_final_weight'] - config['pseudo_initial_weight'])
+            writer.add_scalar('Pseudo/threshold', current_threshold, epoch)
             
             train_loss, train_acc = pseudo_label_epoch(
                 model, train_loader, unlabeled_loader, criterion, optimizer, device, 
