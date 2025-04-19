@@ -458,10 +458,10 @@ def main():
         'batch_size': 16,
         'learning_rate': 0.000001,
         'weight_decay': 1e-5,
-        'num_epochs': 1500,
+        'num_epochs': 1000,
         'pseudo_start_epoch': 30,
-        'confidence_threshold': 0.7,
-        'pseudo_initial_threshold': 0.95,  # Start with higher confidence
+        'confidence_threshold': 0.25,
+        'pseudo_initial_threshold': 0.99,  # Start with higher confidence
         'pseudo_final_threshold': 0.8,    # End with lower threshold
         'pseudo_initial_weight': 0.3,      # Start with lower weight
         'pseudo_final_weight': 0.7,        # End with higher weight
@@ -738,5 +738,72 @@ def generate_submission(model, unlabeled_dataset, device, experiment_path, confi
         with open(experiment_path / 'submission_stats.txt', 'a') as f:
             f.write(f"Class {class_id}: {count} samples ({percentage:.2f}%)\n")
 
+def generate_submission_without_training(confidence_threshold):
+    """
+    Load the best model from a previous experiment and generate a submission file
+    without training the model again.
+    """
+    import glob
+    
+    # Set device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    # Find the latest experiment folder
+    experiments_directory = Path("experiments")
+    experiment_folders = list(experiments_directory.glob("semi_supervised_learning_*"))
+    
+    if not experiment_folders:
+        raise ValueError("No experiment folders found. Please run training first.")
+    
+    # Sort by creation time (newest first)
+    latest_experiment = max(experiment_folders, key=lambda x: os.path.getmtime(x))
+    print(f"Using latest experiment: {latest_experiment}")
+    
+    # Load the configuration
+    config = {}
+    config_path = latest_experiment / 'config.txt'
+    if config_path.exists():
+        with open(config_path, 'r') as f:
+            for line in f:
+                key, value = line.strip().split(': ')
+                config[key] = eval(value) if value.lower() in ['true', 'false'] or value.replace('.', '').replace('-', '').replace('e', '').isdigit() else value
+        print(f"Loaded configuration from {config_path}")
+
+    # Find the best model checkpoint
+    model_files = list(latest_experiment.glob('best_model_acc_val_epoch_*.pth'))
+    if not model_files:
+        raise ValueError(f"No model checkpoints found in {latest_experiment}")
+    
+    # Sort by validation accuracy (highest first)
+    best_model_path = max(model_files, key=lambda x: float(str(x).split('_')[-1].replace('.pth', '')))
+    print(f"Using best model: {best_model_path}")
+    
+    # Initialize the model
+    model = Foram3DCNN(num_classes=15)
+    model = model.to(device)
+    
+    # Load model weights
+    model.load_state_dict(torch.load(best_model_path, map_location=device))
+    print(f"Loaded model weights from {best_model_path}")
+    
+    # Load unlabeled data
+    unlabeled_data_path = Path(r'data\unlabelled.csv')  # Update with your path
+    unlabeled_volume_dir = Path(r'data\volumes\volumes\unlabelled')  # Update with your path
+    
+    unlabeled_df = pd.read_csv(unlabeled_data_path)
+    print(f"Loaded {len(unlabeled_df)} unlabeled samples")
+    
+    # Create dataset and dataloader
+    unlabeled_dataset = ForamUnlabeledDataset(unlabeled_df, unlabeled_volume_dir)
+    
+    # Generate submission
+    print(f'runing with confidence threshold: {confidence_threshold}')
+    generate_submission(model, unlabeled_dataset, device, latest_experiment, confidence_threshold)
+    
+    print(f"Submission file generated in {latest_experiment}")
+
+
 if __name__ == "__main__":
     main()
+    # generate_submission_without_training(confidence_threshold=0.25) # this function reads the best model from the experiment folder and generates the submission file
