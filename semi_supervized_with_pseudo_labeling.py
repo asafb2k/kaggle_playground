@@ -265,66 +265,37 @@ def pseudo_label_epoch(model, labeled_loader, unlabeled_loader, criterion, optim
     # First, collect pseudo-labels in evaluation mode
     model.eval()
     
-    # Apply different augmentations to generate ensemble predictions
-    num_augmentations = 3
-    all_predictions = []
-    all_inputs = []
-    all_ids = []
+    # Collect confident samples directly
+    confident_inputs_list = []
+    confident_labels_list = []
+    pseudo_class_counts = np.zeros(15)
+    max_confidence_in_this_epoch = 0
     
     with torch.no_grad():
         for inputs, ids in tqdm(unlabeled_loader, desc="Generating pseudo-labels"):
             inputs = inputs.to(device)
-            all_inputs.append(inputs.cpu())
-            all_ids.append(ids)
             
-            # Store predictions from the base model
+            # Generate pseudo-labels
             outputs = model(inputs)
             probs = F.softmax(outputs, dim=1)
-            all_predictions.append(probs.cpu())
+            max_probs, pseudo_labels = torch.max(probs, dim=1)
+            max_confidence_in_this_epoch = max(max_probs.max().item(), max_confidence_in_this_epoch)
             
-            # Apply simple augmentations for additional predictions
-            # For example, flip the volume along different axes
-            for aug_idx in range(num_augmentations - 1):
-                # Simple augmentation: flip along a different axis each time
-                aug_dim = 2 + (aug_idx % 3)  # Flipping along spatial dimensions (2,3,4)
-                aug_inputs = torch.flip(inputs, [aug_dim])
-                aug_outputs = model(aug_inputs)
-                aug_probs = F.softmax(aug_outputs, dim=1)
-                all_predictions.append(aug_probs.cpu())
-    
-    # Process ensemble predictions and generate pseudo-labels
-    confident_inputs_list = []
-    confident_labels_list = []
-    pseudo_class_counts = np.zeros(15)
-    
-    total_samples = len(all_inputs)
-    for i in range(total_samples):
-        inputs = all_inputs[i]
-        
-        # Average the predictions across augmentations
-        ensemble_probs = torch.zeros_like(all_predictions[i * num_augmentations])
-        for j in range(num_augmentations):
-            ensemble_probs += all_predictions[i * num_augmentations + j]
-        ensemble_probs /= num_augmentations
-        
-        # Generate pseudo-labels with ensemble predictions
-        max_probs, pseudo_labels = torch.max(ensemble_probs, dim=1)
-        
-        # Only use confident and consistent predictions
-        mask = max_probs > pseudo_threshold
-        
-        # Skip if no confident predictions
-        if not mask.any():
-            continue
+            # Only use confident predictions
+            mask = max_probs > pseudo_threshold
             
-        # Track class distribution of pseudo-labels
-        for c in range(15):
-            pseudo_class_counts[c] += (pseudo_labels[mask] == c).sum().item()
-
-        # Collect confident samples
-        confident_inputs_list.append(inputs[mask])
-        confident_labels_list.append(pseudo_labels[mask])
-
+            # Skip if no confident predictions
+            if not mask.any():
+                continue
+                
+            # Track class distribution of pseudo-labels
+            for c in range(15):
+                pseudo_class_counts[c] += (pseudo_labels[mask] == c).sum().item()
+            
+            # Collect confident samples
+            confident_inputs_list.append(inputs[mask].cpu())
+            confident_labels_list.append(pseudo_labels[mask].cpu())
+    
     # Combine all confident samples
     pseudo_labeled = 0
     if confident_inputs_list:
@@ -332,6 +303,7 @@ def pseudo_label_epoch(model, labeled_loader, unlabeled_loader, criterion, optim
         confident_labels = torch.cat(confident_labels_list, dim=0)
         pseudo_labeled = confident_labels.shape[0]
     
+    print(f"Max confidence in this epoch: {max_confidence_in_this_epoch:.4f}")
     print(f"Generated {pseudo_labeled} confident pseudo-labels")
     writer.add_scalar('Pseudo/num_pseudo_labels', pseudo_labeled, epoch)
     
@@ -460,7 +432,6 @@ def pseudo_label_epoch(model, labeled_loader, unlabeled_loader, criterion, optim
     writer.add_scalar('Accuracy/train', epoch_acc, epoch)
     
     return epoch_loss, epoch_acc
-
 def main():
     # Create a unique run name with timestamp
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -484,14 +455,14 @@ def main():
     config = {
         'experiment_name': experiment_name,
         'device': str(device),
-        'batch_size': 8,
+        'batch_size': 16,
         'learning_rate': 0.000001,
         'weight_decay': 1e-5,
         'num_epochs': 1500,
         'pseudo_start_epoch': 30,
         'confidence_threshold': 0.7,
-        'pseudo_initial_threshold': 0.98,  # Start with higher confidence
-        'pseudo_final_threshold': 0.85,    # End with lower threshold
+        'pseudo_initial_threshold': 0.95,  # Start with higher confidence
+        'pseudo_final_threshold': 0.8,    # End with lower threshold
         'pseudo_initial_weight': 0.3,      # Start with lower weight
         'pseudo_final_weight': 0.7,        # End with higher weight
     }
@@ -533,7 +504,7 @@ def main():
     
     # For faster experimentation, use a subset of unlabeled data
     # Comment out this section if you want to use all unlabeled data
-    subset_size = 300  # Adjust as needed based on your GPU memory
+    subset_size = 1600  # Adjust as needed based on your GPU memory
     subset_indices = np.random.choice(len(unlabeled_dataset), subset_size, replace=False)
     unlabeled_subset = Subset(unlabeled_dataset, subset_indices)
     
@@ -555,10 +526,10 @@ def main():
     
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
-    warmup_epochs = int(0.1 * config['num_epochs'])  # 10% of epochs for warmup
+    warmup_epochs = int(0.01 * config['num_epochs'])  # 10% of epochs for warmup
     warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
         optimizer,
-        start_factor=0.1,  # Start at 10% of the base learning rate
+        start_factor=0.2,  # Start at 10% of the base learning rate
         end_factor=1.0,    # End at the full base learning rate
         total_iters=warmup_epochs
     )
