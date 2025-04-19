@@ -260,138 +260,197 @@ def validate(model, dataloader, criterion, device, writer, epoch):
     
     return epoch_loss, epoch_acc, all_preds, all_labels
 
-# Semi-supervised learning with pseudo-labeling
 def pseudo_label_epoch(model, labeled_loader, unlabeled_loader, criterion, optimizer, device, 
-                       writer, epoch, pseudo_threshold=0.95, pseudo_weight=0.75, scaler=None):
+                      writer, epoch, pseudo_threshold=0.99, pseudo_weight=0.75, scaler=None):
+    # First, collect pseudo-labels in evaluation mode
+    model.eval()
+    
+    # Apply different augmentations to generate ensemble predictions
+    num_augmentations = 3
+    all_predictions = []
+    all_inputs = []
+    all_ids = []
+    
+    with torch.no_grad():
+        for inputs, ids in tqdm(unlabeled_loader, desc="Generating pseudo-labels"):
+            inputs = inputs.to(device)
+            all_inputs.append(inputs.cpu())
+            all_ids.append(ids)
+            
+            # Store predictions from the base model
+            outputs = model(inputs)
+            probs = F.softmax(outputs, dim=1)
+            all_predictions.append(probs.cpu())
+            
+            # Apply simple augmentations for additional predictions
+            # For example, flip the volume along different axes
+            for aug_idx in range(num_augmentations - 1):
+                # Simple augmentation: flip along a different axis each time
+                aug_dim = 2 + (aug_idx % 3)  # Flipping along spatial dimensions (2,3,4)
+                aug_inputs = torch.flip(inputs, [aug_dim])
+                aug_outputs = model(aug_inputs)
+                aug_probs = F.softmax(aug_outputs, dim=1)
+                all_predictions.append(aug_probs.cpu())
+    
+    # Process ensemble predictions and generate pseudo-labels
+    confident_inputs_list = []
+    confident_labels_list = []
+    pseudo_class_counts = np.zeros(15)
+    
+    total_samples = len(all_inputs)
+    for i in range(total_samples):
+        inputs = all_inputs[i]
+        
+        # Average the predictions across augmentations
+        ensemble_probs = torch.zeros_like(all_predictions[i * num_augmentations])
+        for j in range(num_augmentations):
+            ensemble_probs += all_predictions[i * num_augmentations + j]
+        ensemble_probs /= num_augmentations
+        
+        # Generate pseudo-labels with ensemble predictions
+        max_probs, pseudo_labels = torch.max(ensemble_probs, dim=1)
+        
+        # Only use confident and consistent predictions
+        mask = max_probs > pseudo_threshold
+        
+        # Skip if no confident predictions
+        if not mask.any():
+            continue
+            
+        # Track class distribution of pseudo-labels
+        for c in range(15):
+            pseudo_class_counts[c] += (pseudo_labels[mask] == c).sum().item()
+
+        # Collect confident samples
+        confident_inputs_list.append(inputs[mask])
+        confident_labels_list.append(pseudo_labels[mask])
+
+    # Combine all confident samples
+    pseudo_labeled = 0
+    if confident_inputs_list:
+        confident_inputs = torch.cat(confident_inputs_list, dim=0)
+        confident_labels = torch.cat(confident_labels_list, dim=0)
+        pseudo_labeled = confident_labels.shape[0]
+    
+    print(f"Generated {pseudo_labeled} confident pseudo-labels")
+    
+    # SWITCH TO TRAINING MODE FOR THE COMBINED TRAINING
     model.train()
     running_loss = 0.0
     correct = 0
     total = 0
     
-    # First, train on labeled data
-    for inputs, labels in tqdm(labeled_loader, desc="Training on labeled data"):
-        inputs = inputs.to(device)
-        labels = labels.to(device)
-        
-        # Zero the parameter gradients
-        optimizer.zero_grad()
-        
-        if scaler:  # Use mixed precision training if scaler is provided
-            with autocast():
-                outputs = model(inputs)
-                loss = criterion(outputs, labels)
-                
-            # Scale loss and do backward pass
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            # Regular training
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
-        
-        running_loss += loss.item() * inputs.size(0)
-        
-        # Calculate accuracy
-        _, predicted = torch.max(outputs.data, 1)
-        total += labels.size(0)
-        correct += (predicted == labels).sum().item()
-    
-    # Then, use pseudo-labeling on unlabeled data
-    model.eval()  # Switch to eval mode to generate pseudo-labels
-    pseudo_labeled = 0
-    pseudo_loss_sum = 0.0
-    
-    # Class distribution of pseudo-labels
-    pseudo_class_counts = np.zeros(15)
-    
-    with torch.no_grad():
-        for inputs, _ in tqdm(unlabeled_loader, desc="Generating pseudo-labels"):
-            inputs = inputs.to(device)
-            
-            # Generate pseudo-labels
-            outputs = model(inputs)
-            probs = F.softmax(outputs, dim=1)
-            max_probs, pseudo_labels = torch.max(probs, dim=1)
-            
-            # Only use confident predictions
-            mask = max_probs > pseudo_threshold
-            
-            # Skip if no confident predictions
-            if not mask.any():
-                continue
-                
-            # Use confident pseudo-labels for training
-            confident_inputs = inputs[mask]
-            confident_labels = pseudo_labels[mask]
-            
-            # Count how many pseudo-labels we're using
-            pseudo_labeled += mask.sum().item()
-            
-            # Track class distribution of pseudo-labels
-            for c in range(15):
-                pseudo_class_counts[c] += (pseudo_labels[mask] == c).sum().item()
-    
-    # Now train on pseudo-labeled data
+    # If we have pseudo-labeled data, combine it with labeled data in each batch
     if pseudo_labeled > 0:
-        model.train()  # Switch back to train mode
+        # Create a dataset from the confident samples
+        confident_dataset = torch.utils.data.TensorDataset(confident_inputs, confident_labels)
+        confident_loader = DataLoader(
+            confident_dataset, 
+            batch_size=labeled_loader.batch_size, 
+            shuffle=True,
+            num_workers=0
+        )
         
-        for inputs, _ in tqdm(unlabeled_loader, desc="Training on pseudo-labeled data"):
+        # First, train on labeled data
+        for inputs, labels in tqdm(labeled_loader, desc="Training on labeled data"):
             inputs = inputs.to(device)
+            labels = labels.to(device)
             
-            # Generate pseudo-labels
-            with torch.no_grad():
-                outputs = model(inputs)
-                probs = F.softmax(outputs, dim=1)
-                max_probs, pseudo_labels = torch.max(probs, dim=1)
-                
-                # Only use confident predictions
-                mask = max_probs > pseudo_threshold
-                
-                # Skip if no confident predictions
-                if not mask.any():
-                    continue
-            
-            # Use confident pseudo-labels for training
-            confident_inputs = inputs[mask]
-            confident_labels = pseudo_labels[mask]
-            
-            # Train on pseudo-labeled data
+            # Zero the parameter gradients
             optimizer.zero_grad()
             
             if scaler:
-                with autocast():
-                    outputs_pl = model(confident_inputs)
-                    # Apply a weight to pseudo-labeled loss (typically lower than labeled data)
-                    loss_pl = criterion(outputs_pl, confident_labels) * pseudo_weight
+                with torch.amp.autocast(device_type='cuda'):
+                    outputs = model(inputs)
+                    loss = criterion(outputs, labels)
                     
                 # Scale loss and do backward pass
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                outputs = model(inputs)
+                loss = criterion(outputs, labels)
+                loss.backward()
+                optimizer.step()
+            
+            running_loss += loss.item() * inputs.size(0)
+            
+            # Calculate accuracy
+            _, predicted = torch.max(outputs.data, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+        
+        # Then, train on pseudo-labeled data
+        pseudo_loss_sum = 0.0
+        for inputs, labels in tqdm(confident_loader, desc="Training on pseudo-labeled data"):
+            inputs = inputs.to(device)
+            labels = labels.to(device)
+            
+            optimizer.zero_grad()
+            
+            if scaler:
+                with torch.amp.autocast(device_type='cuda'):
+                    outputs_pl = model(inputs)
+                    loss_pl = criterion(outputs_pl, labels) * pseudo_weight
+                    
                 scaler.scale(loss_pl).backward()
                 scaler.step(optimizer)
                 scaler.update()
             else:
-                outputs_pl = model(confident_inputs)
-                loss_pl = criterion(outputs_pl, confident_labels) * pseudo_weight
+                outputs_pl = model(inputs)
+                loss_pl = criterion(outputs_pl, labels) * pseudo_weight
                 loss_pl.backward()
                 optimizer.step()
             
-            # Update metrics (but don't count pseudo-labeled samples in accuracy)
-            pseudo_loss_sum += loss_pl.item() * confident_inputs.size(0)
-    
-    print(f"Used {pseudo_labeled} pseudo-labeled samples")
-    
-    # Log pseudo-labeling metrics to TensorBoard
-    writer.add_scalar('Pseudo/samples_used', pseudo_labeled, epoch)
-    if pseudo_labeled > 0:
+            # Update metrics for pseudo-labeled data
+            pseudo_loss_sum += loss_pl.item() * inputs.size(0)
+            
+            # Include pseudo-labeled samples in overall metrics
+            running_loss += loss_pl.item() * inputs.size(0)
+            _, predicted = torch.max(outputs_pl.data, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+        
+        # Log pseudo-labeling metrics to TensorBoard
+        writer.add_scalar('Pseudo/samples_used', pseudo_labeled, epoch)
         writer.add_scalar('Pseudo/avg_loss', pseudo_loss_sum / pseudo_labeled, epoch)
+        
+        # Log class distribution of pseudo-labels
+        for c in range(15):
+            writer.add_scalar(f'Pseudo/class_{c}_count', pseudo_class_counts[c], epoch)
+    else:
+        # If no pseudo-labels, just train on labeled data
+        for inputs, labels in tqdm(labeled_loader, desc="Training on labeled data only"):
+            inputs = inputs.to(device)
+            labels = labels.to(device)
+            
+            # Zero the parameter gradients
+            optimizer.zero_grad()
+            
+            if scaler:
+                with torch.amp.autocast(device_type='cuda'):
+                    outputs = model(inputs)
+                    loss = criterion(outputs, labels)
+                    
+                # Scale loss and do backward pass
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                outputs = model(inputs)
+                loss = criterion(outputs, labels)
+                loss.backward()
+                optimizer.step()
+            
+            running_loss += loss.item() * inputs.size(0)
+            
+            # Calculate accuracy
+            _, predicted = torch.max(outputs.data, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
     
-    # Log class distribution of pseudo-labels
-    for c in range(15):
-        writer.add_scalar(f'Pseudo/class_{c}_count', pseudo_class_counts[c], epoch)
-    
-    # Return the metrics from labeled data only for consistent monitoring
+    # Calculate epoch metrics
     epoch_loss = running_loss / total
     epoch_acc = correct / total
     
@@ -428,10 +487,12 @@ def main():
         'learning_rate': 0.000001,
         'weight_decay': 1e-5,
         'num_epochs': 1500,
-        'pseudo_start_epoch': 15,
-        'pseudo_threshold': 0.95,
-        'pseudo_weight': 0.75,
+        'pseudo_start_epoch': 30,
         'confidence_threshold': 0.7,
+        'pseudo_initial_threshold': 0.99,  # Start with higher confidence
+        'pseudo_final_threshold': 0.85,    # End with lower threshold
+        'pseudo_initial_weight': 0.3,      # Start with lower weight
+        'pseudo_final_weight': 0.7,        # End with higher weight
     }
     
     # Save config to experiment directory
@@ -471,7 +532,7 @@ def main():
     
     # For faster experimentation, use a subset of unlabeled data
     # Comment out this section if you want to use all unlabeled data
-    subset_size = 10000  # Adjust as needed based on your GPU memory
+    subset_size = 300  # Adjust as needed based on your GPU memory
     subset_indices = np.random.choice(len(unlabeled_dataset), subset_size, replace=False)
     unlabeled_subset = Subset(unlabeled_dataset, subset_indices)
     
@@ -493,11 +554,26 @@ def main():
     
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    warmup_epochs = int(0.1 * config['num_epochs'])  # 10% of epochs for warmup
+    warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+        optimizer,
+        start_factor=0.1,  # Start at 10% of the base learning rate
+        end_factor=1.0,    # End at the full base learning rate
+        total_iters=warmup_epochs
+    )
+
+    # Then, define the main scheduler that will run after warmup
+    main_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=config['num_epochs'] - warmup_epochs,
+        eta_min=1e-7  # Minimum learning rate at the end
+    )
+
+    # And use a sequential scheduler to chain them
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
         optimizer, 
-        max_lr=0.00001,
-        total_steps=config['num_epochs'],
-        pct_start=0.01,  # Spend 10% of training time warming up
+        schedulers=[warmup_scheduler, main_scheduler],
+        milestones=[warmup_epochs]
     )
     
     # Use mixed precision training if available
@@ -510,8 +586,6 @@ def main():
     
     # Hyperparameters for pseudo-labeling
     pseudo_start_epoch = config['pseudo_start_epoch']
-    pseudo_threshold = config['pseudo_threshold']
-    pseudo_weight = config['pseudo_weight']
     
     # For tracking metrics
     train_losses = []
@@ -526,9 +600,14 @@ def main():
         
         # Train with pseudo-labeling
         if epoch >= pseudo_start_epoch:
+            # Calculate dynamic threshold and weight based on progress
+            progress = min(1.0, (epoch - pseudo_start_epoch) / (num_epochs - pseudo_start_epoch))
+            current_threshold = config['pseudo_initial_threshold'] - progress * (config['pseudo_initial_threshold'] - config['pseudo_final_threshold'])
+            current_weight = config['pseudo_initial_weight'] + progress * (config['pseudo_final_weight'] - config['pseudo_initial_weight'])
+            
             train_loss, train_acc = pseudo_label_epoch(
                 model, train_loader, unlabeled_loader, criterion, optimizer, device, 
-                writer, epoch, pseudo_threshold=pseudo_threshold, pseudo_weight=pseudo_weight, scaler=scaler
+                writer, epoch, pseudo_threshold=current_threshold, pseudo_weight=current_weight, scaler=scaler
             )
         else:
             # Regular supervised training for initial epochs
