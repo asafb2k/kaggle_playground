@@ -461,7 +461,7 @@ def main():
         'num_epochs': 1000,
         'pseudo_start_epoch': 30,
         'confidence_threshold': 0.25,
-        'pseudo_initial_threshold': 0.99,  # Start with higher confidence
+        'pseudo_initial_threshold': 0.995,  # Start with higher confidence
         'pseudo_final_threshold': 0.8,    # End with lower threshold
         'pseudo_initial_weight': 0.3,      # Start with lower weight
         'pseudo_final_weight': 0.7,        # End with higher weight
