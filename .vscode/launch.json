@@ -48,5 +48,12 @@
             "module": "generate_submission",
             "console": "integratedTerminal"
         },
+        {
+            "name": "visualization_tsne",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "visualization_tsne",
+            "console": "integratedTerminal"
+        }
     ]
 }
