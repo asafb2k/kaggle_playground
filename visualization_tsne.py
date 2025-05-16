@@ -101,7 +101,7 @@ def extract_features(model, dataloader, device):
     else:
         return features, ids
 
-def plot_3d_tsne(features, labels, save_path, title="t-SNE Visualization of CNN Features", show_only_specific_classes=[10,6]):
+def plot_3d_tsne(features, labels, save_path, title="t-SNE Visualization of CNN Features", show_only_specific_classes=None):
     """Create and save 3D t-SNE plot"""
     # Perform t-SNE
     print("Performing t-SNE reduction...")
