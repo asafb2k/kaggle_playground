@@ -805,5 +805,5 @@ def generate_submission_without_training(confidence_threshold):
 
 
 if __name__ == "__main__":
-    main()
-    # generate_submission_without_training(confidence_threshold=0.25) # this function reads the best model from the experiment folder and generates the submission file
+    # main()
+    generate_submission_without_training(confidence_threshold=0.1) # this function reads the best model from the experiment folder and generates the submission file
