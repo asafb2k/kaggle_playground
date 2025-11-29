@@ -112,13 +112,23 @@ def plot_3d_tsne(features, labels, save_path, title="t-SNE Visualization of CNN 
     fig = plt.figure(figsize=(12, 8))
     ax = fig.add_subplot(111, projection='3d')
     
-    # If we have labels (for labeled data)
-    if isinstance(labels, np.ndarray):
+    # If we have numeric labels (for labeled data)
+    if isinstance(labels, np.ndarray) and np.issubdtype(labels.dtype, np.number):
         unique_labels = np.unique(labels)
         colors = plt.cm.rainbow(np.linspace(0, 1, len(unique_labels)))
         
         for label, color in zip(unique_labels, colors):
             if show_only_specific_classes is not None and label in show_only_specific_classes:
+                mask = labels == label
+                ax.scatter(
+                    features_tsne[mask, 0],
+                    features_tsne[mask, 1],
+                    features_tsne[mask, 2],
+                    c=[color],
+                    label=f'Class {label}',
+                    alpha=0.6
+                )
+            elif show_only_specific_classes is None:
                 mask = labels == label
                 ax.scatter(
                     features_tsne[mask, 0],
@@ -135,21 +145,49 @@ def plot_3d_tsne(features, labels, save_path, title="t-SNE Visualization of CNN 
             features_tsne[:, 0],
             features_tsne[:, 1],
             features_tsne[:, 2],
-            alpha=0.6
+            c='blue',  # Single color for all unlabeled points
+            alpha=0.6,
+            label='Unlabeled Data'
         )
+        plt.legend()
     
     ax.set_title(title)
     ax.set_xlabel('t-SNE 1')
     ax.set_ylabel('t-SNE 2')
     ax.set_zlabel('t-SNE 3')
 
+    # Save the plot
+    plt.savefig(save_path)
+    plt.close()
+    print(f"Plot saved to {save_path}")
+
     # lets show the plot and play with it interactively
     plt.show()
     plt.pause(500)
-    # Save the plot
-    # plt.savefig(save_path)
-    # plt.close()
-    # print(f"Plot saved to {save_path}")
+
+def plot_raw_data_tsne(dataloader, save_path, title="t-SNE Visualization of Raw Data"):
+    """Create t-SNE visualization of raw data by flattening the 3D volumes"""
+    print("Collecting and flattening raw data...")
+    all_data = []
+    all_labels = []
+    
+    # Collect all data
+    for inputs, labels in tqdm(dataloader, desc="Loading data"):
+        # Flatten each sample: from (B, 1, D, H, W) to (B, D*H*W)
+        flattened = inputs.view(inputs.size(0), -1)
+        all_data.append(flattened.numpy())
+        all_labels.append(labels.numpy())
+    
+    # Combine all batches
+    X = np.concatenate(all_data, axis=0)
+    labels = np.concatenate(all_labels, axis=0)
+    
+    print(f"Performing t-SNE on raw data of shape {X.shape}...")
+    tsne = TSNE(n_components=3, random_state=42, perplexity=30)
+    X_tsne = tsne.fit_transform(X)
+    
+    # Create visualization
+    plot_3d_tsne(X_tsne, labels, save_path, title)
 
 def main():
     # Set device
@@ -199,31 +237,39 @@ def main():
     vis_dir = latest_experiment / 'visualizations'
     vis_dir.mkdir(exist_ok=True)
     
-    # Extract and visualize features for labeled data
-    print("\nProcessing labeled data...")
-    labeled_features, labeled_labels = extract_features(feature_extractor, labeled_loader, device)
-    plot_3d_tsne(
-        labeled_features,
-        labeled_labels,
-        vis_dir / 'tsne_labeled_data.png',
-        "t-SNE Visualization of CNN Features (Labeled Data)"
+    # # Extract and visualize features for labeled data
+    # print("\nProcessing labeled data with CNN features...")
+    # labeled_features, labeled_labels = extract_features(feature_extractor, labeled_loader, device)
+    # plot_3d_tsne(
+    #     labeled_features,
+    #     labeled_labels,
+    #     vis_dir / 'tsne_labeled_data_cnn.png',
+    #     "t-SNE Visualization of CNN Features (Labeled Data)"
+    # )
+    
+    # Create t-SNE visualization of raw data
+    print("\nProcessing raw labeled data...")
+    plot_raw_data_tsne(
+        labeled_loader,
+        vis_dir / 'tsne_labeled_data_raw.png',
+        "t-SNE Visualization of Raw Data (Labeled Data)"
     )
     
-    # Extract and visualize features for unlabeled data
-    print("\nProcessing unlabeled data...")
-    unlabeled_features, unlabeled_ids = extract_features(feature_extractor, unlabeled_loader, device)
-    plot_3d_tsne(
-        unlabeled_features,
-        unlabeled_ids,
-        vis_dir / 'tsne_unlabeled_data.png',
-        "t-SNE Visualization of CNN Features (Unlabeled Data)"
-    )
+    # # Extract and visualize features for unlabeled data
+    # print("\nProcessing unlabeled data...")
+    # unlabeled_features, unlabeled_ids = extract_features(feature_extractor, unlabeled_loader, device)
+    # plot_3d_tsne(
+    #     unlabeled_features,
+    #     unlabeled_ids,
+    #     vis_dir / 'tsne_unlabeled_data.png',
+    #     "t-SNE Visualization of CNN Features (Unlabeled Data)"
+    # )
     
-    # Save the features for potential future use
-    np.save(vis_dir / 'labeled_features.npy', labeled_features)
-    np.save(vis_dir / 'labeled_labels.npy', labeled_labels)
-    np.save(vis_dir / 'unlabeled_features.npy', unlabeled_features)
-    np.save(vis_dir / 'unlabeled_ids.npy', unlabeled_ids)
+    # # Save the features for potential future use
+    # np.save(vis_dir / 'labeled_features.npy', labeled_features)
+    # np.save(vis_dir / 'labeled_labels.npy', labeled_labels)
+    # np.save(vis_dir / 'unlabeled_features.npy', unlabeled_features)
+    # np.save(vis_dir / 'unlabeled_ids.npy', unlabeled_ids)
     
     print(f"\nVisualization and features saved in {vis_dir}")
 

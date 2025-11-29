@@ -6,6 +6,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, confusion_matrix
 from pathlib import Path
 import os
+import argparse
+import sys
 
 import torch
 import torch.nn as nn
@@ -21,59 +23,22 @@ from tqdm import tqdm
 import time
 import datetime
 
+# Import custom modules
+from models import resnet10_3d, resnet18_3d
+from transforms import get_train_transform, get_val_transform
+
 # Set random seeds for reproducibility
 np.random.seed(42)
 torch.manual_seed(42)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(42)
 
-# Define the CNN model for 3D volumes
-class Foram3DCNN(nn.Module):
-    def __init__(self, num_classes=15):  # Changed to 15 classes (14 + unknown)
-        super(Foram3DCNN, self).__init__()
-        
-        # Convolutional layers
-        self.conv1 = nn.Conv3d(1, 16, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm3d(16)
-        self.pool1 = nn.MaxPool3d(kernel_size=2, stride=2)  # Output: [16, 64, 64, 64]
-        
-        self.conv2 = nn.Conv3d(16, 32, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm3d(32)
-        self.pool2 = nn.MaxPool3d(kernel_size=2, stride=2)  # Output: [32, 32, 32, 32]
-        
-        self.conv3 = nn.Conv3d(32, 64, kernel_size=3, padding=1)
-        self.bn3 = nn.BatchNorm3d(64)
-        self.pool3 = nn.MaxPool3d(kernel_size=2, stride=2)  # Output: [64, 16, 16, 16]
-        
-        self.conv4 = nn.Conv3d(64, 128, kernel_size=3, padding=1)
-        self.bn4 = nn.BatchNorm3d(128)
-        self.pool4 = nn.MaxPool3d(kernel_size=2, stride=2)  # Output: [128, 8, 8, 8]
-        
-        # Fully connected layers
-        self.fc1 = nn.Linear(128 * 8 * 8 * 8, 512)
-        self.dropout = nn.Dropout(0.5)
-        self.fc2 = nn.Linear(512, num_classes)
-        
-    def forward(self, x):
-        # Convolutional layers with batch normalization and pooling
-        x = self.pool1(F.relu(self.bn1(self.conv1(x))))
-        x = self.pool2(F.relu(self.bn2(self.conv2(x))))
-        x = self.pool3(F.relu(self.bn3(self.conv3(x))))
-        x = self.pool4(F.relu(self.bn4(self.conv4(x))))
-        
-        # Flatten for fully connected layers
-        x = x.view(-1, 128 * 8 * 8 * 8)
-        x = F.relu(self.fc1(x))
-        x = self.dropout(x)
-        x = self.fc2(x)
-        
-        return x
-
 # Dataset class for loading labeled 3D volumes
 class ForamDataset(Dataset):
-    def __init__(self, data_frame, volume_dir):
+    def __init__(self, data_frame, volume_dir, transform=None):
         self.data_frame = data_frame
         self.volume_dir = volume_dir
+        self.transform = transform
         
         # Pre-find all file paths to speed up loading
         self.file_paths = {}
@@ -99,9 +64,12 @@ class ForamDataset(Dataset):
         # Load volume
         volume = tifffile.imread(file_path)
         
-        # Add channel dimension and normalize
+        # Add channel dimension
         volume = volume.reshape(1, *volume.shape)
         volume = volume.astype(np.float32) / volume.max()  # Normalize to [0,1]
+        
+        if self.transform:
+            volume = self.transform(volume)
         
         volume_tensor = torch.tensor(volume, dtype=torch.float32)
         
@@ -109,9 +77,10 @@ class ForamDataset(Dataset):
 
 # Dataset class for loading unlabeled 3D volumes
 class ForamUnlabeledDataset(Dataset):
-    def __init__(self, data_frame, volume_dir):
+    def __init__(self, data_frame, volume_dir, transform=None):
         self.data_frame = data_frame
         self.volume_dir = volume_dir
+        self.transform = transform
         
         # Pre-find all file paths to speed up loading
         self.file_paths = {}
@@ -136,9 +105,12 @@ class ForamUnlabeledDataset(Dataset):
         # Load volume
         volume = tifffile.imread(file_path)
         
-        # Add channel dimension and normalize
+        # Add channel dimension
         volume = volume.reshape(1, *volume.shape)
         volume = volume.astype(np.float32) / volume.max()  # Normalize to [0,1]
+        
+        if self.transform:
+            volume = self.transform(volume)
         
         volume_tensor = torch.tensor(volume, dtype=torch.float32)
         
@@ -213,13 +185,36 @@ def validate(model, dataloader, criterion, device, writer, epoch):
             inputs = inputs.to(device)
             labels = labels.to(device)
             
+            # Test Time Augmentation (TTA)
+            # We will average predictions from original and flipped versions
             outputs = model(inputs)
+            probs = F.softmax(outputs, dim=1)
+            
+            # Flip depth
+            inputs_flip_d = torch.flip(inputs, [2])
+            outputs_flip_d = model(inputs_flip_d)
+            probs += F.softmax(outputs_flip_d, dim=1)
+            
+            # Flip height
+            inputs_flip_h = torch.flip(inputs, [3])
+            outputs_flip_h = model(inputs_flip_h)
+            probs += F.softmax(outputs_flip_h, dim=1)
+            
+            # Flip width
+            inputs_flip_w = torch.flip(inputs, [4])
+            outputs_flip_w = model(inputs_flip_w)
+            probs += F.softmax(outputs_flip_w, dim=1)
+            
+            # Average probabilities
+            probs /= 4.0
+            
+            # Calculate loss using original outputs (approximation)
             loss = criterion(outputs, labels)
             
             running_loss += loss.item() * inputs.size(0)
             
-            # Calculate accuracy
-            _, predicted = torch.max(outputs.data, 1)
+            # Calculate accuracy from averaged probabilities
+            _, predicted = torch.max(probs, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
             
@@ -275,9 +270,22 @@ def pseudo_label_epoch(model, labeled_loader, unlabeled_loader, criterion, optim
         for inputs, ids in tqdm(unlabeled_loader, desc="Generating pseudo-labels"):
             inputs = inputs.to(device)
             
-            # Generate pseudo-labels
+            # Generate pseudo-labels with TTA
             outputs = model(inputs)
             probs = F.softmax(outputs, dim=1)
+            
+            # TTA for pseudo-labeling too
+            inputs_flip_d = torch.flip(inputs, [2])
+            probs += F.softmax(model(inputs_flip_d), dim=1)
+            
+            inputs_flip_h = torch.flip(inputs, [3])
+            probs += F.softmax(model(inputs_flip_h), dim=1)
+            
+            inputs_flip_w = torch.flip(inputs, [4])
+            probs += F.softmax(model(inputs_flip_w), dim=1)
+            
+            probs /= 4.0
+            
             max_probs, pseudo_labels = torch.max(probs, dim=1)
             max_confidence_in_this_epoch = max(max_probs.max().item(), max_confidence_in_this_epoch)
             
@@ -432,10 +440,26 @@ def pseudo_label_epoch(model, labeled_loader, unlabeled_loader, criterion, optim
     writer.add_scalar('Accuracy/train', epoch_acc, epoch)
     
     return epoch_loss, epoch_acc
+
 def main():
+    parser = argparse.ArgumentParser(description='Foram 3D CNN Training')
+    parser.add_argument('--exp_name', type=str, default=None, help='Experiment name')
+    parser.add_argument('--model', type=str, default='resnet10', choices=['resnet10', 'resnet18'], help='Model architecture')
+    parser.add_argument('--lr', type=float, default=0.0001, help='Learning rate')
+    parser.add_argument('--batch_size', type=int, default=16, help='Batch size')
+    parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
+    parser.add_argument('--pseudo_start', type=int, default=30, help='Epoch to start pseudo-labeling')
+    parser.add_argument('--aug_mode', type=str, default='all', choices=['all', 'flip', 'none'], help='Augmentation mode')
+    parser.add_argument('--weight_decay', type=float, default=1e-5, help='Weight decay')
+    
+    args = parser.parse_args()
+
     # Create a unique run name with timestamp
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    experiment_name = f'semi_supervised_learning_{timestamp}'
+    if args.exp_name:
+        experiment_name = f'{args.exp_name}_{timestamp}'
+    else:
+        experiment_name = f'semi_supervised_{args.model}_{args.aug_mode}_{timestamp}'
     
     # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -455,16 +479,18 @@ def main():
     config = {
         'experiment_name': experiment_name,
         'device': str(device),
-        'batch_size': 16,
-        'learning_rate': 0.000001,
-        'weight_decay': 1e-5,
-        'num_epochs': 1000,
-        'pseudo_start_epoch': 30,
+        'batch_size': args.batch_size,
+        'learning_rate': args.lr,
+        'weight_decay': args.weight_decay,
+        'num_epochs': args.epochs,
+        'pseudo_start_epoch': args.pseudo_start,
         'confidence_threshold': 0.25,
-        'pseudo_initial_threshold': 0.995,  # Start with higher confidence
-        'pseudo_final_threshold': 0.8,    # End with lower threshold
-        'pseudo_initial_weight': 0.3,      # Start with lower weight
-        'pseudo_final_weight': 0.7,        # End with higher weight
+        'pseudo_initial_threshold': 0.995,
+        'pseudo_final_threshold': 0.8,
+        'pseudo_initial_weight': 0.3,
+        'pseudo_final_weight': 0.7,
+        'model': args.model,
+        'aug_mode': args.aug_mode
     }
     
     # Save config to experiment directory
@@ -497,10 +523,14 @@ def main():
     writer.add_text('Data/val_labeled', str(len(val_df)))
     writer.add_text('Data/unlabeled', str(len(unlabeled_df)))
     
+    # Create transforms
+    train_transform = get_train_transform(mean=0.15, std=0.25, mode=args.aug_mode)
+    val_transform = get_val_transform(mean=0.15, std=0.25)
+    
     # Create datasets
-    train_dataset = ForamDataset(train_df, labeled_volume_dir)
-    val_dataset = ForamDataset(val_df, labeled_volume_dir)
-    unlabeled_dataset = ForamUnlabeledDataset(unlabeled_df, unlabeled_volume_dir)
+    train_dataset = ForamDataset(train_df, labeled_volume_dir, transform=train_transform)
+    val_dataset = ForamDataset(val_df, labeled_volume_dir, transform=val_transform)
+    unlabeled_dataset = ForamUnlabeledDataset(unlabeled_df, unlabeled_volume_dir, transform=val_transform)
     
     # For faster experimentation, use a subset of unlabeled data
     # Comment out this section if you want to use all unlabeled data
@@ -517,7 +547,13 @@ def main():
     # unlabeled_loader = DataLoader(unlabeled_dataset, batch_size=config['batch_size'], shuffle=True, num_workers=0)
     
     # Initialize model, loss function, and optimizer
-    model = Foram3DCNN(num_classes=15)  # 15 classes including unknown class
+    if args.model == 'resnet10':
+        model = resnet10_3d(num_classes=15)
+    elif args.model == 'resnet18':
+        model = resnet18_3d(num_classes=15)
+    else:
+        raise ValueError(f"Unknown model: {args.model}")
+        
     model = model.to(device)
     
     # Log model graph to TensorBoard (requires a sample input)
@@ -676,6 +712,23 @@ def main():
     
     print(f"TensorBoard logs saved to {tensorboard_path}")
     print(f"To view TensorBoard, run: tensorboard --logdir={tensorboard_path}")
+    
+    # Append results to a summary CSV
+    summary_path = experiments_directory / 'experiments_summary.csv'
+    header = not summary_path.exists()
+    
+    summary_data = {
+        'experiment_name': experiment_name,
+        'model': args.model,
+        'aug_mode': args.aug_mode,
+        'lr': args.lr,
+        'batch_size': args.batch_size,
+        'best_val_acc': best_val_acc,
+        'training_time_min': elapsed_time / 60
+    }
+    
+    pd.DataFrame([summary_data]).to_csv(summary_path, mode='a', header=header, index=False)
+    print(f"Experiment summary saved to {summary_path}")
 
 def generate_submission(model, unlabeled_dataset, device, experiment_path, confidence_threshold=0.7):
     """Generate submission file for the competition"""
@@ -690,11 +743,24 @@ def generate_submission(model, unlabeled_dataset, device, experiment_path, confi
         for inputs, ids in tqdm(unlabeled_loader, desc="Generating predictions"):
             inputs = inputs.to(device)
             
-            # Forward pass
+            # Test Time Augmentation (TTA)
             outputs = model(inputs)
-            
-            # Get probabilities
             probs = F.softmax(outputs, dim=1)
+            
+            # Flip depth
+            inputs_flip_d = torch.flip(inputs, [2])
+            probs += F.softmax(model(inputs_flip_d), dim=1)
+            
+            # Flip height
+            inputs_flip_h = torch.flip(inputs, [3])
+            probs += F.softmax(model(inputs_flip_h), dim=1)
+            
+            # Flip width
+            inputs_flip_w = torch.flip(inputs, [4])
+            probs += F.softmax(model(inputs_flip_w), dim=1)
+            
+            # Average probabilities
+            probs /= 4.0
             
             # For 15-class model, handle unknown class differently
             # First 14 classes (0-13) are the known foram types
@@ -780,7 +846,7 @@ def generate_submission_without_training(confidence_threshold):
     print(f"Using best model: {best_model_path}")
     
     # Initialize the model
-    model = Foram3DCNN(num_classes=15)
+    model = resnet10_3d(num_classes=15)
     model = model.to(device)
     
     # Load model weights
@@ -795,7 +861,9 @@ def generate_submission_without_training(confidence_threshold):
     print(f"Loaded {len(unlabeled_df)} unlabeled samples")
     
     # Create dataset and dataloader
-    unlabeled_dataset = ForamUnlabeledDataset(unlabeled_df, unlabeled_volume_dir)
+    # Use validation transform for inference
+    val_transform = get_val_transform(mean=0.15, std=0.25)
+    unlabeled_dataset = ForamUnlabeledDataset(unlabeled_df, unlabeled_volume_dir, transform=val_transform)
     
     # Generate submission
     print(f'runing with confidence threshold: {confidence_threshold}')
@@ -805,5 +873,5 @@ def generate_submission_without_training(confidence_threshold):
 
 
 if __name__ == "__main__":
-    # main()
-    generate_submission_without_training(confidence_threshold=0.1) # this function reads the best model from the experiment folder and generates the submission file
+    main()
+    # generate_submission_without_training(confidence_threshold=0.1) # this function reads the best model from the experiment folder and generates the submission file
